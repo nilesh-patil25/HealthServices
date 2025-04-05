@@ -1,75 +1,80 @@
-﻿using PatientSatisfactionFeedback.Context;
-using Jose;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using PatientSatisfactionFeedback.Context;
+using PatientSatisfactionFeedback.Models;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
-using PatientSatisfactionFeedback.Models;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace PatientSatisfactionFeedback.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
- 
     public class JWTTokenController : ControllerBase
     {
-        public IConfiguration _configuration;
-        public readonly ApplicationDbContext _context;
+        private readonly IConfiguration _configuration;
+        private readonly ApplicationDbContext _context;
+        private readonly ILogger<JWTTokenController> _logger;
 
-        public JWTTokenController(IConfiguration configuration, ApplicationDbContext context)
+        public JWTTokenController(IConfiguration configuration, ApplicationDbContext context, ILogger<JWTTokenController> logger)
         {
-            _context = context;
             _configuration = configuration;
+            _context = context;
+            _logger = logger;
         }
-        [HttpPost]
-        public async Task<IActionResult> Post(User user)
+
+        [HttpPost("generate-token")]
+        public async Task<IActionResult> GenerateToken([FromBody] User user)
         {
-            if (user != null && user.UserName != null && user.Password != null)
-            {
-                var userData = await GetUser(user.UserName, user.Password);
-                var jwt = _configuration.GetSection("Jwt").Get<Jwt>();
-                if (user != null)
-                {
-                    var claims = new[]
-                    {
-                        new Claim(JwtRegisteredClaimNames.Sub, jwt.Subject),
-                        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-                         new Claim(JwtRegisteredClaimNames.Iat, DateTime.UtcNow.ToString()),
-                         new Claim("Id", user.UserId.ToString()),
-                         new Claim("UserName", user.UserName),
-                         new Claim("Password", user.Password)
+            if (user == null || string.IsNullOrWhiteSpace(user.UserName) || string.IsNullOrWhiteSpace(user.Password))
+                return BadRequest("Invalid user data.");
 
-                    };
-                    var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key));
-                    var signIn = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-                    var token = new JwtSecurityToken(
-                        jwt.Issuer,
-                        jwt.Audience,
-                        claims,
-                        expires: DateTime.Now.AddMinutes(60),
-                        signingCredentials: signIn);
-                    return Ok(new JwtSecurityTokenHandler().WriteToken(token));
+            var userData = await ValidateUserAsync(user.UserName, user.Password);
+            if (userData == null)
+                return Unauthorized("Invalid username or password.");
 
-                }
+            var jwtSettings = _configuration.GetSection("Jwt").Get<Jwt>();
+            var token = GenerateJwtToken(userData, jwtSettings);
+
+            return Ok(new { Token = token });
+        }
+
+        private async Task<User> ValidateUserAsync(string username, string password)
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.UserName == username);
+            if (user == null || !BCrypt.Net.BCrypt.Verify(password, user.Password)) // Hash password comparison
+                return null;
             
-            else
-            {
-                return BadRequest("Invalid Credentials");
-            }
+            return user;
         }
-             else
-            {
-                return BadRequest("Invalid User Data");
-            }
-        }
-        [HttpGet]
-        public async Task<User> GetUser(string username, string password)
+
+        private string GenerateJwtToken(User user, Jwt jwtSettings)
         {
-            return await _context.Users.FirstOrDefaultAsync(u => u.UserName == username && u.Password == password);
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, jwtSettings.Subject),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new Claim(JwtRegisteredClaimNames.Iat, DateTime.UtcNow.ToString()),
+                new Claim("UserId", user.UserId.ToString()),
+                new Claim("UserName", user.UserName),
+            };
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.Key));
+            var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+            var token = new JwtSecurityToken(
+                issuer: jwtSettings.Issuer,
+                audience: jwtSettings.Audience,
+                claims: claims,
+                expires: DateTime.UtcNow.AddMinutes(60),
+                signingCredentials: credentials
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
         }
     }
 }
